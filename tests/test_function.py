@@ -75,12 +75,12 @@ class elemwise(TestCase):
   def test_evalf(self):
     for i, trans in enumerate(self.domain.transforms):
       with self.subTest(i=i):
-        numpy.testing.assert_array_almost_equal(self.func.prepare_eval().eval(_transforms=(trans,)), self.data[i][_])
+        numpy.testing.assert_array_almost_equal(self.func.prepare_eval(ndims=self.domain.ndims).eval(_transforms=(trans,), _points=points.SimplexGaussPoints(self.domain.ndims, 1)), self.data[i][_])
 
   def test_shape(self):
     for i, trans in enumerate(self.domain.transforms):
       with self.subTest(i=i):
-        self.assertEqual(self.func.size.prepare_eval().eval(_transforms=(trans,))[0], self.data[i].size)
+        self.assertEqual(self.func.size.prepare_eval(ndims=self.domain.ndims).eval(_transforms=(trans,)), self.data[i].size)
 
   def test_derivative(self):
     self.assertTrue(evaluable.iszero(function.localgradient(self.func, self.domain.ndims).prepare_eval(ndims=self.domain.ndims)))
@@ -146,8 +146,8 @@ class namespace(TestCase):
     with self.assertRaises(ValueError):
       function.Namespace(default_geometry_name='foo_bar')
 
-  def assertEqualLowered(self, actual, desired):
-    return self.assertEqual(actual.prepare_eval(), desired.prepare_eval())
+  def assertEqualLowered(self, actual, desired, **lowerargs):
+    return self.assertEqual(actual.prepare_eval(**lowerargs), desired.prepare_eval(**lowerargs))
 
   def test_default_geometry_property(self):
     ns = function.Namespace()
@@ -169,7 +169,7 @@ class namespace(TestCase):
     ns1.basis = domain.basis('spline', degree=2)
     ns2 = ns1.copy_(default_geometry_name='y')
     self.assertEqual(ns2.default_geometry_name, 'y')
-    self.assertEqualLowered(ns2.eval_ni('basis_n,i'), ns2.basis.grad(ns2.y))
+    self.assertEqualLowered(ns2.eval_ni('basis_n,i'), ns2.basis.grad(ns2.y), ndims=domain.ndims)
 
   def test_copy_preserve_geom(self):
     ns1 = function.Namespace(default_geometry_name='y')
@@ -177,7 +177,7 @@ class namespace(TestCase):
     ns1.basis = domain.basis('spline', degree=2)
     ns2 = ns1.copy_()
     self.assertEqual(ns2.default_geometry_name, 'y')
-    self.assertEqualLowered(ns2.eval_ni('basis_n,i'), ns2.basis.grad(ns2.y))
+    self.assertEqualLowered(ns2.eval_ni('basis_n,i'), ns2.basis.grad(ns2.y), ndims=domain.ndims)
 
   def test_copy_fixed_lengths(self):
     ns = function.Namespace(length_i=2)
@@ -253,7 +253,7 @@ class namespace(TestCase):
     orig.f = 'cosh(x_0)'
     pickled = pickle.loads(pickle.dumps(orig))
     for attr in ('x', 'v', 'u', 'f'):
-      self.assertEqualLowered(getattr(pickled, attr), getattr(orig, attr))
+      self.assertEqualLowered(getattr(pickled, attr), getattr(orig, attr), ndims=domain.ndims)
     self.assertEqual(pickled.arg_shapes['lhs'], orig.arg_shapes['lhs'])
 
   def test_pickle_default_geometry_name(self):
@@ -282,7 +282,7 @@ class namespace(TestCase):
   def test_d_geom(self):
     ns = function.Namespace()
     topo, ns.x = mesh.rectilinear([1])
-    self.assertEqualLowered(ns.eval_ij('d(x_i, x_j)'), function.grad(ns.x, ns.x))
+    self.assertEqualLowered(ns.eval_ij('d(x_i, x_j)'), function.grad(ns.x, ns.x), ndims=topo.ndims)
 
   def test_d_arg(self):
     ns = function.Namespace()
@@ -292,7 +292,7 @@ class namespace(TestCase):
   def test_n(self):
     ns = function.Namespace()
     topo, ns.x = mesh.rectilinear([1])
-    self.assertEqualLowered(ns.eval_i('n(x_i)'), function.normal(ns.x))
+    self.assertEqualLowered(ns.eval_i('n(x_i)'), function.normal(ns.x), ndims=topo.ndims)
 
   def test_functions(self):
     def sqr(a):
@@ -596,38 +596,37 @@ class CommonBasis:
             self.assertEqual(maskedbasis.get_coefficients(ielem).tolist(), numpy.compress(m, self.checkcoeffs[ielem], axis=0).tolist())
 
   def checkeval(self, ielem, points):
-    result = numpy.zeros((points.shape[0], self.checkndofs,), dtype=float)
-    numpy.add.at(result, (slice(None),numpy.array(self.checkdofs[ielem], dtype=int)), numeric.poly_eval(numpy.array(self.checkcoeffs[ielem], dtype=float), points))
+    result = numpy.zeros((points.npoints, self.checkndofs,), dtype=float)
+    numpy.add.at(result, (slice(None),numpy.array(self.checkdofs[ielem], dtype=int)), numeric.poly_eval(numpy.array(self.checkcoeffs[ielem], dtype=float), points.coords))
     return result.tolist()
 
-  def test_simplified(self):
+  def test_lower(self):
     ref = element.PointReference() if self.basis.coords.shape[0] == 0 else element.LineReference()**self.basis.coords.shape[0]
-    points = ref.getpoints('bezier', 4).coords
-    simplified = self.basis.simplified
+    points = ref.getpoints('bezier', 4)
     with _builtin_warnings.catch_warnings():
       _builtin_warnings.simplefilter('ignore', category=evaluable.ExpensiveEvaluationWarning)
       for ielem in range(self.checknelems):
-        value = simplified.prepare_eval().eval(_transforms=(self.checktransforms[ielem],), _points=points)
+        value = self.basis.prepare_eval(ndims=points.ndims).eval(_transforms=(self.checktransforms[ielem],), _points=points)
         if value.shape[0] == 1:
-          value = numpy.tile(value, (points.shape[0], 1))
+          value = numpy.tile(value, (points.npoints, 1))
         self.assertEqual(value.tolist(), self.checkeval(ielem, points))
 
   def test_f_ndofs(self):
     for ielem in range(self.checknelems):
       a = self.basis.get_ndofs(ielem)
-      b, = self.basis.f_ndofs(ielem).eval()
+      b = int(self.basis.f_ndofs(ielem).eval()[()])
       self.assertEqual(a, b)
 
   def test_f_dofs(self):
     for ielem in range(self.checknelems):
       a = self.basis.get_dofs(ielem)
-      b, = self.basis.f_dofs(ielem).eval()
+      b = self.basis.f_dofs(ielem).eval()
       self.assertAllEqual(a, b)
 
   def test_f_coefficients(self):
     for ielem in range(self.checknelems):
       a = self.basis.get_coefficients(ielem)
-      b, = self.basis.f_coefficients(ielem).eval()
+      b = self.basis.f_coefficients(ielem).eval()
       self.assertAllEqual(a, b)
 
 class PlainBasis(CommonBasis, TestCase):

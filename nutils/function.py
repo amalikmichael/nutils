@@ -25,7 +25,7 @@ else:
   Protocol = object
 
 from typing import Tuple, Union, Type, Callable, Sequence, Any, Optional, Iterator, Dict, Mapping, overload, List, Set
-from . import evaluable, numeric, util, expression, types
+from . import evaluable, numeric, util, expression, types, warnings
 from .transformseq import Transforms
 import builtins, numpy, re, types as builtin_types, itertools, functools, operator, abc, numbers
 
@@ -37,7 +37,30 @@ DType = Type[Union[bool, int, float]]
 class Lowerable(Protocol):
   'Protocol for lowering to :class:`nutils.evaluable.Array`.'
 
-  def prepare_eval(self, *, ndims: int, opposite: bool = False, replacements: Optional[Mapping[str, 'Array']] = None) -> evaluable.Array: ...
+  def prepare_eval(self, *, ndims: int, opposite: bool = False, with_points: bool = True, npoints: Union[int, evaluable.Array] = evaluable.NPoints(), replacements: Optional[Mapping[str, 'Array']] = None) -> evaluable.Array:
+    '''Lower this object to a :class:`nutils.evaluable.Array`.
+
+    Parameters
+    ----------
+    ndims : :class:`int`
+        The dimension of the :class:`~nutils.sample.Sample` on which the
+        resulting :class:`nutils.evaluable.Array` will be evaluated.
+    opposite : :class:`bool`
+        Indicates which transform chain to use when evaluating the resulting
+        :class:`~nutils.evaluable.Array`. This has no effect when there is only
+        one transform chain.
+    with_points : :class:`bool`
+        If true the resulting :class:`~nutils.evaluable.Array` will have a leading points axis.
+    npoints : :class:`int` or :class:`nutils.evaluable.Array`
+        The length of the points axis.
+    replacements : :class:`dict` of :class:`str` and :class:`Array`
+        Mapping of :class:`Argument` replacements. The keys refer to the
+        :attr:`Argument.name` attribute. The replacements are not applied recursively.
+    '''
+
+def _strip_points(arg: evaluable.Array) -> evaluable.Array:
+  assert isinstance(arg._axes[0], evaluable.Inserted)
+  return arg[0]
 
 class Int(Lowerable):
   '''Integer valued function.
@@ -89,8 +112,8 @@ class Int(Lowerable):
 
     return self._array
 
-  def prepare_eval(self, **kwargs: Any) -> evaluable.Array:
-    return self._array.prepare_eval(**kwargs)
+  def prepare_eval(self, *, with_points: bool = True, **kwargs: Any) -> evaluable.Array:
+    return self._array.prepare_eval(with_points=False, **kwargs)
 
   @property
   def try_as_int(self) -> Union[int, 'Int']:
@@ -171,7 +194,7 @@ if __debug__:
   def _prepare_eval(self, **kwargs):
     result = self._ArrayMeta__prepare_eval(**kwargs)
     assert isinstance(result, evaluable.Array)
-    offset = 0
+    offset = 1 if kwargs.get('with_points', True) else 0
     assert result.ndim == self.ndim + offset
     for n, m in zip(result.shape[offset:], self.shape):
       if isinstance(m, int):
@@ -449,7 +472,22 @@ class Array(Lowerable, metaclass=_ArrayMeta):
 
   @property
   def simplified(self):
+    warnings.deprecation('`nutils.function.Array.simplified` is deprecated. This property returns the array unmodified and can safely be omitted.')
     return self
+
+def _prepend_points(__arg: evaluable.Array, *, with_points: bool = True, **kwargs: Any) -> evaluable.Array:
+  if with_points:
+    return evaluable.prependaxes(__arg, (evaluable.NPoints(),))
+  else:
+    return __arg
+
+class _WithoutPoints(Lowerable):
+
+  def __init__(self, __arg: Array) -> None:
+    self._arg = __arg
+
+  def prepare_eval(self, *, with_points: bool = True, **kwargs):
+    return self._arg.prepare_eval(with_points=False, **kwargs)
 
 class _Wrapper(Array):
 
@@ -489,7 +527,8 @@ class _Zeros(Array):
     return self.shape, self.dtype
 
   def prepare_eval(self, **kwargs: Any) -> evaluable.Array:
-    return evaluable.Zeros(tuple(Int.cast(n).prepare_eval(**kwargs) for n in self.shape), self.dtype)
+    shape = (evaluable.NPoints(),) if kwargs.get('with_points', True) else ()
+    return evaluable.Zeros((*shape, *(Int.cast(n).prepare_eval(**kwargs) for n in self.shape)), self.dtype)
 
 class _Ones(Array):
 
@@ -497,7 +536,8 @@ class _Ones(Array):
     return self.shape, self.dtype
 
   def prepare_eval(self, **kwargs: Any) -> evaluable.Array:
-    return evaluable.ones(tuple(Int.cast(n).prepare_eval(**kwargs) for n in self.shape), self.dtype)
+    shape = (evaluable.NPoints(),) if kwargs.get('with_points', True) else ()
+    return evaluable.ones((*shape, *(Int.cast(n).prepare_eval(**kwargs) for n in self.shape)), self.dtype)
 
 class _Constant(Array):
 
@@ -510,7 +550,7 @@ class _Constant(Array):
     return self._value,
 
   def prepare_eval(self, **kwargs: Any) -> evaluable.Array:
-    return typing.cast(evaluable.Array, self._value)
+    return _prepend_points(self._value, **kwargs)
 
 class Argument(Array):
   '''Array valued function argument.
@@ -545,7 +585,7 @@ class Argument(Array):
       # `_Replace.prepare_eval`.
       return replacement.prepare_eval(**kwargs)
     shape = tuple(n.prepare_eval(**kwargs) if isinstance(n, Int) else n for n in self.shape)
-    return evaluable.Argument(self.name, shape)
+    return _prepend_points(evaluable.Argument(self.name, shape), **kwargs)
 
 class _Replace(Array):
 
@@ -604,7 +644,8 @@ class _Transpose(Array):
     return self._arg, self._axes
 
   def prepare_eval(self, **kwargs: Any) -> evaluable.Array:
-    return evaluable.Transpose(self._arg.prepare_eval(**kwargs), self._axes)
+    axes = (0, *(i+1 for i in self._axes)) if kwargs.get('with_points', True) else self._axes
+    return evaluable.Transpose(self._arg.prepare_eval(**kwargs), axes)
 
 class _Opposite(Array):
 
@@ -626,7 +667,7 @@ class _LocalCoords(Array):
   def __getnewargs__(self):
     return self.shape[0],
 
-  def prepare_eval(self, **kwargs: Any) -> evaluable.Array:
+  def prepare_eval(self, *, with_points: bool = True, **kwargs: Any) -> evaluable.Array:
     raise ValueError('cannot be lowered')
 
 class _RootCoords(Array):
@@ -637,10 +678,11 @@ class _RootCoords(Array):
   def __getnewargs__(self):
     return self.shape[0],
 
-  def prepare_eval(self, *, opposite: bool = False, **kwargs) -> evaluable.Array:
+  def prepare_eval(self, *, ndims: int, npoints: Union[int, evaluable.Array] = evaluable.NPoints(), with_points: bool = True, opposite: bool = False, **kwargs) -> evaluable.Array:
+    assert with_points
     trans = evaluable.SelectChain(int(opposite))
     trans = evaluable.PopHead(self.shape[0], trans)
-    points = evaluable.Points()
+    points = evaluable.Points(npoints, ndims)
     return evaluable.ApplyTransforms(trans, points)
 
 class _TransformsIndex(Array):
@@ -655,7 +697,7 @@ class _TransformsIndex(Array):
   def prepare_eval(self, *, opposite: bool = False, **kwargs: Any) -> evaluable.Array:
     trans = evaluable.SelectChain(int(opposite))
     index, tail = evaluable.TransformsIndexWithTail(self._transforms, trans)
-    return index
+    return _prepend_points(index, **kwargs)
 
 class _TransformsCoords(Array):
 
@@ -666,9 +708,10 @@ class _TransformsCoords(Array):
   def __getnewargs__(self):
     return self._transforms, self.shape[0]
 
-  def prepare_eval(self, *, opposite: bool = False, **kwargs: Any) -> evaluable.Array:
+  def prepare_eval(self, *, ndims: int, npoints: Union[int, evaluable.Array] = evaluable.NPoints(), with_points: bool = True, opposite: bool = False, **kwargs: Any) -> evaluable.Array:
+    assert with_points
     index, tail = evaluable.TransformsIndexWithTail(self._transforms, evaluable.SelectChain(int(opposite)))
-    points = evaluable.Points()
+    points = evaluable.Points(npoints, ndims)
     return evaluable.ApplyTransforms(tail, points)
 
 class _Derivative(Array):
@@ -730,7 +773,18 @@ class _Elemwise(Array):
     return self._data, self._index, self.dtype
 
   def prepare_eval(self, **kwargs: Any) -> evaluable.Array:
-    return evaluable.Elemwise(self._data, self._index.prepare_eval(**kwargs), self.dtype)
+    return _prepend_points(evaluable.Elemwise(self._data, self._index.prepare_eval(**kwargs), self.dtype), **kwargs)
+
+class RevolutionAngle(Array):
+
+  def __init__(self):
+    super().__init__((), float)
+
+  def __getnewargs__(self):
+    return ()
+
+  def prepare_eval(self, **kwargs: Any) -> evaluable.Array:
+    return _prepend_points(evaluable.RevolutionAngle(), **kwargs)
 
 def _join_lengths(*lengths_: IntoInt) -> IntoInt:
   lengths = set(lengths_)
@@ -1921,7 +1975,7 @@ def take(__array: IntoArray, __indices: IntoArray, axis: int) -> Array:
       raise ValueError('The length of the mask differs from the length of the given axis.')
     indices = find(indices)
   transposed = _Transpose.to_end(array, axis)
-  taken = _Wrapper(evaluable.Take, transposed, indices, shape=(*transposed.shape[:-1], *indices.shape), dtype=array.dtype)
+  taken = _Wrapper(evaluable.Take, transposed, _WithoutPoints(indices), shape=(*transposed.shape[:-1], *indices.shape), dtype=array.dtype)
   return _Transpose.from_end(taken, *range(axis, axis+indices.ndim))
 
 def get(__array: IntoArray, __axis: int, __index: IntoInt) -> Array:
@@ -2009,7 +2063,7 @@ def inflate(__array: IntoArray, indices: IntoArray, length: IntoInt, axis: int) 
   axis = numeric.normdim(array.ndim+1-indices.ndim, axis)
   # TODO: assert indices.shape == array.shape[axis:axis+indices.ndim]
   transposed = _Transpose.to_end(array, *range(axis, axis+indices.ndim))
-  inflated = _Wrapper(evaluable.Inflate, transposed, indices, length, shape=(*transposed.shape[:transposed.ndim-indices.ndim], length), dtype=transposed.dtype)
+  inflated = _Wrapper(evaluable.Inflate, transposed, _WithoutPoints(indices), length, shape=(*transposed.shape[:transposed.ndim-indices.ndim], length), dtype=transposed.dtype)
   return _Transpose.from_end(inflated, axis)
 
 def kronecker(__array: IntoArray, axis: int, length: IntoInt, pos: IntoInt) -> Array:
@@ -2435,7 +2489,7 @@ def Sampled(__points: IntoArray, expect: IntoArray) -> Array:
   points = Array.cast(__points)
   expect = Array.cast(expect)
   assert points.ndim == 1 and expect.ndim == 2 and expect.shape[1] == points.shape[0]
-  return _Wrapper(evaluable.Sampled, points, expect, shape=(expect.shape[0],), dtype=int)
+  return _Wrapper(evaluable.Sampled, points, _WithoutPoints(expect), shape=(expect.shape[0],), dtype=int)
 
 def piecewise(level: IntoArray, intervals: Sequence[IntoArray], *funcs: IntoArray) -> Array:
   'piecewise'
@@ -2495,6 +2549,7 @@ def choose(__index: IntoArray, __choices: Sequence[IntoArray]) -> Array:
   if index.ndim != 0:
     raise ValueError
   choices, shape, dtype = _broadcast(*__choices)
+  index = _append_axes(index, shape)
   return _Wrapper(_eval_choose, index, *choices, shape=shape, dtype=dtype)
 
 def chain(_funcs: Sequence[IntoArray]) -> Sequence[Array]:
@@ -2534,9 +2589,6 @@ def add_T(__arg: IntoArray, axes: Tuple[int, int] = (-2,-1)) -> Array:
   'add transposed'
   arg = Array.cast(__arg)
   return swapaxes(arg, *axes) + arg
-
-def RevolutionAngle() -> Array:
-  return _Wrapper(evaluable.RevolutionAngle, shape=(), dtype=float)
 
 def bifurcate1(__arg: IntoArray) -> Array:
   arg = Array.cast(__arg)
