@@ -2995,9 +2995,6 @@ def sin(x):
 def cos(x):
   return Cos(x)
 
-def rotmat(arg):
-  return stack([trignormal(arg), trigtangent(arg)], 0)
-
 def tan(x):
   return Tan(x)
 
