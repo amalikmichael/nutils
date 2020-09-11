@@ -58,10 +58,6 @@ class Lowerable(Protocol):
         :attr:`Argument.name` attribute. The replacements are not applied recursively.
     '''
 
-def _strip_points(arg: evaluable.Array) -> evaluable.Array:
-  assert isinstance(arg._axes[0], evaluable.Inserted)
-  return arg[0]
-
 class Int(Lowerable):
   '''Integer valued function.
 
@@ -1700,7 +1696,7 @@ def takediag(__arg: IntoArray, __axis: int = -2, __rmaxis: int = -1) -> Array:
 
   See Also
   --------
-  :func:`diagonalize` : The inverse operation.
+  :func:`diagonalize` : The complement operation.
   '''
   arg = Array.cast(__arg)
   axis = numeric.normdim(arg.ndim, __axis)
@@ -1725,7 +1721,7 @@ def diagonalize(__arg: IntoArray, __axis: int = -1, __newaxis: int = -1) -> Arra
 
   See Also
   --------
-  :func:`takediag` : The inverse operation.
+  :func:`takediag` : The complement operation.
   '''
 
   arg = Array.cast(__arg)
